@@ -36,6 +36,7 @@ import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver.OnWindowFocusChangeListener;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.Toast;
@@ -47,8 +48,13 @@ import com.google.ar.core.Plane;
 import com.google.ar.core.Session;
 import com.google.ar.core.Trackable;
 import com.google.ar.core.TrackingState;
+
 import com.google.ar.core.exceptions.CameraNotAvailableException;
+import com.google.ar.core.exceptions.UnavailableApkTooOldException;
+import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException;
+import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException;
 import com.google.ar.core.exceptions.UnavailableException;
+import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.ar.sceneform.ArSceneView;
 import com.google.ar.sceneform.FrameTime;
 import com.google.ar.sceneform.HitTestResult;
@@ -56,11 +62,25 @@ import com.google.ar.sceneform.Scene;
 import com.google.ar.sceneform.rendering.ModelRenderable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /** The AR fragment brings in the required view layout and controllers for common AR features. */
 public abstract class BaseArFragment extends Fragment
     implements Scene.OnPeekTouchListener, Scene.OnUpdateListener {
   private static final String TAG = BaseArFragment.class.getSimpleName();
+
+  /** Invoked when the ARCore Session is initialized. */
+  public interface OnSessionInitializationListener {
+    /**
+     * The callback will only be invoked once after a Session is initialized and before it is
+     * resumed for the first time.
+     *
+     * @see #setOnSessionInitializationListener(OnTapArPlaneListener)
+     * @param session The ARCore Session.
+     */
+    void onSessionInitialization(Session session);
+  }
+
   /** Invoked when an ARCore plane is tapped. */
   public interface OnTapArPlaneListener {
     /**
@@ -85,7 +105,12 @@ public abstract class BaseArFragment extends Fragment
   private FrameLayout frameLayout;
   private boolean isStarted;
   private boolean canRequestDangerousPermissions = true;
+  @Nullable private OnSessionInitializationListener onSessionInitializationListener;
   @Nullable private OnTapArPlaneListener onTapArPlaneListener;
+
+  @SuppressWarnings({"initialization"})
+  private final OnWindowFocusChangeListener onFocusListener =
+      (hasFocus -> onWindowFocusChanged(hasFocus));
 
   /** Gets the ArSceneView for this fragment. */
   public ArSceneView getArSceneView() {
@@ -105,6 +130,17 @@ public abstract class BaseArFragment extends Fragment
    */
   public TransformationSystem getTransformationSystem() {
     return transformationSystem;
+  }
+
+  /**
+   * Registers a callback to be invoked when the ARCore Session is initialized. The callback will
+   * only be invoked once after the Session is initialized and before it is resumed.
+   *
+   * @param onSessionInitializationListener the {@link OnSessionInitializationListener} to attach.
+   */
+  public void setOnSessionInitializationListener(
+      @Nullable OnSessionInitializationListener onSessionInitializationListener) {
+    this.onSessionInitializationListener = onSessionInitializationListener;
   }
 
   /**
@@ -128,7 +164,9 @@ public abstract class BaseArFragment extends Fragment
 
     // Setup the instructions view.
     View instructionsView = loadPlaneDiscoveryView(inflater, container);
-    frameLayout.addView(instructionsView);
+    if (instructionsView != null) {
+      frameLayout.addView(instructionsView);
+    }
     planeDiscoveryController = new PlaneDiscoveryController(instructionsView);
 
     if (Build.VERSION.SDK_INT < VERSION_CODES.N) {
@@ -163,11 +201,14 @@ public abstract class BaseArFragment extends Fragment
     }
 
     // Make the app immersive and don't turn off the display.
-    arSceneView
-        .getViewTreeObserver()
-        .addOnWindowFocusChangeListener(hasFocus -> onWindowFocusChanged(hasFocus));
-
+    arSceneView.getViewTreeObserver().addOnWindowFocusChangeListener(onFocusListener);
     return frameLayout;
+  }
+
+  @Override
+  public void onDestroyView() {
+    super.onDestroyView();
+    arSceneView.getViewTreeObserver().removeOnWindowFocusChangeListener(onFocusListener);
   }
 
   /**
@@ -299,6 +340,18 @@ public abstract class BaseArFragment extends Fragment
     start();
   }
 
+  
+  protected final boolean requestInstall() throws UnavailableException {
+    switch (ArCoreApk.getInstance().requestInstall(requireActivity(), !installRequested)) {
+      case INSTALL_REQUESTED:
+        installRequested = true;
+        return true;
+      case INSTALLED:
+        break;
+    }
+    return false;
+  }
+
   /**
    * Initializes the ARCore session. The CAMERA permission is checked before checking the
    * installation state of ARCore. Once the permissions and installation are OK, the method
@@ -319,14 +372,15 @@ public abstract class BaseArFragment extends Fragment
 
       UnavailableException sessionException = null;
       try {
-        switch (ArCoreApk.getInstance().requestInstall(requireActivity(), !installRequested)) {
-          case INSTALL_REQUESTED:
-            installRequested = true;
-            return;
-          case INSTALLED:
-            break;
+        if (requestInstall()) {
+          return;
         }
-        Session session = new Session(requireActivity());
+
+        Session session = createSession();
+
+        if (this.onSessionInitializationListener != null) {
+          this.onSessionInitializationListener.onSessionInitialization(session);
+        }
 
         Config config = getSessionConfiguration(session);
         // Force the non-blocking mode for the session.
@@ -349,19 +403,48 @@ public abstract class BaseArFragment extends Fragment
     }
   }
 
+  private Session createSession()
+      throws UnavailableSdkTooOldException, UnavailableDeviceNotCompatibleException,
+          UnavailableArcoreNotInstalledException, UnavailableApkTooOldException {
+    Session session = createSessionWithFeatures();
+    if (session == null) {
+      session = new Session(requireActivity());
+    }
+    return session;
+  }
+
+  /**
+   * Creates the ARCore Session with the with features defined in #getSessionFeatures. If this
+   * returns null, the Session will be created with the default features.
+   */
+  
+  protected @Nullable Session createSessionWithFeatures()
+      throws UnavailableSdkTooOldException, UnavailableDeviceNotCompatibleException,
+          UnavailableArcoreNotInstalledException, UnavailableApkTooOldException {
+    return new Session(requireActivity(), getSessionFeatures());
+  }
+
   /**
    * Creates the transformation system used by this fragment. Can be overridden to create a custom
    * transformation system.
    */
-  @SuppressWarnings({"AndroidApiChecker", "FutureReturnValueIgnored"})
   protected TransformationSystem makeTransformationSystem() {
     FootprintSelectionVisualizer selectionVisualizer = new FootprintSelectionVisualizer();
 
     TransformationSystem transformationSystem =
         new TransformationSystem(getResources().getDisplayMetrics(), selectionVisualizer);
 
+    setupSelectionRenderable(selectionVisualizer);
+
+    return transformationSystem;
+  }
+
+  @SuppressWarnings({"AndroidApiChecker", "FutureReturnValueIgnored"})
+  
+  protected void setupSelectionRenderable(FootprintSelectionVisualizer selectionVisualizer) {
     ModelRenderable.builder()
         .setSource(getActivity(), R.raw.sceneform_footprint)
+        .setIsFilamentGltf(true)
         .build()
         .thenAccept(
             renderable -> {
@@ -380,13 +463,18 @@ public abstract class BaseArFragment extends Fragment
               toast.show();
               return null;
             });
-
-    return transformationSystem;
   }
 
   protected abstract void handleSessionException(UnavailableException sessionException);
 
   protected abstract Config getSessionConfiguration(Session session);
+
+  /**
+   * Specifies additional features for creating an ARCore {@link com.google.ar.core.Session}. See
+   * {@link com.google.ar.core.Session.Feature}.
+   */
+  
+  protected abstract Set<Session.Feature> getSessionFeatures();
 
   protected void onWindowFocusChanged(boolean hasFocus) {
     FragmentActivity activity = getActivity();
@@ -471,6 +559,8 @@ public abstract class BaseArFragment extends Fragment
   }
 
   // Load the default view we use for the plane discovery instructions.
+  @Nullable
+  
   private View loadPlaneDiscoveryView(LayoutInflater inflater, @Nullable ViewGroup container) {
     return inflater.inflate(R.layout.sceneform_plane_discovery_layout, container, false);
   }

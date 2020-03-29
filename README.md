@@ -16,7 +16,7 @@ To get started with the Sceneform SDK, follow the ARCore [Android Quickstart](//
 
 ## API Reference
 
-See the [Sceneform API Reference](//developers.google.com/ar/reference/java/com/google/ar/sceneform/package-summary).
+See the [Sceneform API Reference](//developers.google.com/sceneform/reference/com/google/ar/sceneform/package-summary).
 
 
 ## Release Notes
@@ -27,3 +27,12 @@ The SDK release notes are available on the [releases](//github.com/google-ar/sce
 ## Terms & Conditions
 
 By downloading the Sceneform SDK for Android, you agree that the [Google APIs Terms of Service](//developers.google.com/terms/) governs your use thereof.
+
+
+## User privacy requirements
+
+You must disclose the use of Google Play Services for AR (ARCore) and how it
+collects and processes data, prominently in your application, easily accessible
+to users. You can do this by adding the following text on your main menu or
+notice screen: "This application runs on [Google Play Services for AR](//play.google.com/store/apps/details?id=com.google.ar.core) (ARCore),
+which is provided by Google LLC and governed by the [Google Privacy Policy](//policies.google.com/privacy)".
